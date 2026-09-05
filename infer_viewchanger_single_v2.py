@@ -272,7 +272,7 @@ parser.add_argument('--theta', type=int, required=True, help='elevation angle, m
 parser.add_argument('--r', default= 0, type=int, required=False, help='radius')
 parser.add_argument(
     '--device_map', choices=('none', 'balanced'), default='none',
-    help='Use `balanced` to shard the FLUX pipeline across all visible GPUs (requires accelerate >= 0.28).',
+    help='Use `balanced` to shard the PE-Field transformer across all visible GPUs (requires accelerate >= 0.28).',
 )
 parser.add_argument(
     '--max_gpu_memory', type=str, default='28GiB',
@@ -307,32 +307,30 @@ if args.device_map == 'balanced':
             'Use CUDA_VISIBLE_DEVICES to select them, or use --device_map none.'
         )
 
-    # Diffusers can shard a component only when it loads that component itself.
-    # Expose the PE-Field replacement transformer at the location declared by
-    # the official Kontext model_index.json without duplicating its ~24 GB files.
-    transformer_source = Path(args.transformer_checkpoint_path).resolve() / 'transformer'
-    transformer_destination = Path(args.flux_kontext_path).resolve() / 'transformer'
-    if not transformer_source.is_dir():
-        raise FileNotFoundError(f'PE-Field transformer directory not found: {transformer_source}')
-
-    if os.path.lexists(transformer_destination):
-        if not transformer_destination.is_symlink() or transformer_destination.resolve() != transformer_source:
-            raise RuntimeError(
-                f'{transformer_destination} already exists and is not the expected PE-Field transformer symlink. '
-                'Move it aside, then rerun with --device_map balanced.'
-            )
-    else:
-        transformer_destination.symlink_to(
-            os.path.relpath(transformer_source, transformer_destination.parent), target_is_directory=True
-        )
-
+    # Pipeline-level `device_map="balanced"` only assigns whole components and
+    # therefore puts the entire 23.8 GB transformer on one GPU.  Shard the
+    # transformer itself instead, which distributes its DiT blocks over both
+    # visible GPUs.  The remaining pipeline models are small enough to keep on
+    # the final GPU; this also makes the pipeline create its inputs there.
     max_memory = {gpu_id: args.max_gpu_memory for gpu_id in range(torch.cuda.device_count())}
-    pipe = FluxKontextPipeline.from_pretrained(
-        args.flux_kontext_path,
+    transformer = FluxTransformer2DModel.from_pretrained(
+        args.transformer_checkpoint_path,
+        subfolder='transformer',
         torch_dtype=torch.bfloat16,
         device_map='balanced',
         max_memory=max_memory,
     )
+    pipe = FluxKontextPipeline.from_pretrained(
+        args.flux_kontext_path,
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+    )
+    auxiliary_device = f'cuda:{torch.cuda.device_count() - 1}'
+    pipe.vae.to(auxiliary_device)
+    pipe.text_encoder.to(auxiliary_device)
+    pipe.text_encoder_2.to(auxiliary_device)
+    if pipe.image_encoder is not None:
+        pipe.image_encoder.to(auxiliary_device)
 else:
     transformer = FluxTransformer2DModel.from_pretrained(
         args.transformer_checkpoint_path, subfolder='transformer', torch_dtype=torch.bfloat16
@@ -537,4 +535,3 @@ for image_path in image_paths:
         image.save(os.path.join(output_dir, f"{base_name}_output.png"))
     
     
-
