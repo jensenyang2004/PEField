@@ -127,6 +127,14 @@ def main():
     parser.add_argument('--moge_checkpoint_path', type=Path, default=ROOT / 'moge-2-vitl-normal' / 'model.pt')
     parser.add_argument('--transformer_checkpoint_path', type=Path, default=ROOT / 'checkpoints')
     parser.add_argument('--flux_kontext_path', type=Path, default=ROOT / 'FLUX.1-Kontext-dev')
+    parser.add_argument(
+        '--device_map', choices=('none', 'balanced'), default='none',
+        help='Use `balanced` to shard the PE-Field transformer across all visible GPUs (requires accelerate >= 0.28).',
+    )
+    parser.add_argument(
+        '--max_gpu_memory', type=str, default='28GiB',
+        help='Per-GPU allocation limit used with --device_map balanced. Leave headroom for MoGe and activations.',
+    )
     args = parser.parse_args()
 
     with (args.bench_dir / 'LoMOE.json').open() as file:
@@ -140,9 +148,10 @@ def main():
     prompt, source_spans = build_instruction(source_phrases, target_phrases)
 
     image_path = args.bench_dir / record['image_path']
-    image_np = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
-    if image_np is None:
+    image_bgr = cv2.imread(str(image_path))
+    if image_bgr is None:
         raise FileNotFoundError(image_path)
+    image_np = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     height, width = image_np.shape[:2]
     masks = []
     for path in mask_paths:
@@ -167,12 +176,45 @@ def main():
     intrinsics = moge_output['intrinsics'].cpu().numpy()
     image_ids, centroid_ids = prepare_image_ids_and_centroids(depth, masks, intrinsics, output_height, output_width)
 
-    transformer = FluxTransformer2DModel.from_pretrained(
-        args.transformer_checkpoint_path, subfolder='transformer', torch_dtype=torch.bfloat16
-    )
-    pipe = FluxKontextPipeline.from_pretrained(
-        args.flux_kontext_path, transformer=transformer, torch_dtype=torch.bfloat16
-    ).to(device)
+    if args.device_map == 'balanced':
+        if torch.cuda.device_count() < 2:
+            raise RuntimeError(
+                '--device_map balanced requires at least two visible CUDA GPUs. '
+                'Use CUDA_VISIBLE_DEVICES to select them, or use --device_map none.'
+            )
+
+        # Pipeline-level `device_map="balanced"` only assigns whole components and
+        # therefore puts the entire 23.8 GB transformer on one GPU.  Shard the
+        # transformer itself instead, which distributes its DiT blocks over both
+        # visible GPUs. Keep the text encoders and VAE on GPU 0: placing T5-XXL on
+        # GPU 1 alongside its transformer blocks leaves too little room for the
+        # large attention workspace used during denoising.
+        max_memory = {gpu_id: args.max_gpu_memory for gpu_id in range(torch.cuda.device_count())}
+        transformer = FluxTransformer2DModel.from_pretrained(
+            args.transformer_checkpoint_path,
+            subfolder='transformer',
+            torch_dtype=torch.bfloat16,
+            device_map='balanced',
+            max_memory=max_memory,
+        )
+        pipe = FluxKontextPipeline.from_pretrained(
+            args.flux_kontext_path,
+            transformer=transformer,
+            torch_dtype=torch.bfloat16,
+        )
+        auxiliary_device = 'cuda:0'
+        pipe.vae.to(auxiliary_device)
+        pipe.text_encoder.to(auxiliary_device)
+        pipe.text_encoder_2.to(auxiliary_device)
+        if pipe.image_encoder is not None:
+            pipe.image_encoder.to(auxiliary_device)
+    else:
+        transformer = FluxTransformer2DModel.from_pretrained(
+            args.transformer_checkpoint_path, subfolder='transformer', torch_dtype=torch.bfloat16
+        )
+        pipe = FluxKontextPipeline.from_pretrained(
+            args.flux_kontext_path, transformer=transformer, torch_dtype=torch.bfloat16
+        ).to(device)
     pipe.set_progress_bar_config(disable=True)
     text_ids, token_indices = make_text_ids(
         pipe.tokenizer_2, prompt, source_spans, centroid_ids, pipe.text_encoder.dtype, pipe._execution_device
