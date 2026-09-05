@@ -270,6 +270,14 @@ parser.add_argument('--output_dir', type=str, required=True, help='output path')
 parser.add_argument('--phi', type=int, required=True, help='azimuth angle, rotation around y-axis in the horizontal xz-plane')
 parser.add_argument('--theta', type=int, required=True, help='elevation angle, measured from y-axis downward')
 parser.add_argument('--r', default= 0, type=int, required=False, help='radius')
+parser.add_argument(
+    '--device_map', choices=('none', 'balanced'), default='none',
+    help='Use `balanced` to shard the FLUX pipeline across all visible GPUs (requires accelerate >= 0.28).',
+)
+parser.add_argument(
+    '--max_gpu_memory', type=str, default='28GiB',
+    help='Per-GPU allocation limit used with --device_map balanced. Leave headroom for MoGe and activations.',
+)
 args = parser.parse_args()
 
 
@@ -292,10 +300,48 @@ set moge's input
 
 
 
-transformer = FluxTransformer2DModel.from_pretrained(args.transformer_checkpoint_path, subfolder="transformer", torch_dtype=torch.bfloat16)
-pipe = FluxKontextPipeline.from_pretrained(args.flux_kontext_path, transformer = transformer, torch_dtype=torch.bfloat16)
+if args.device_map == 'balanced':
+    if torch.cuda.device_count() < 2:
+        raise RuntimeError(
+            '--device_map balanced requires at least two visible CUDA GPUs. '
+            'Use CUDA_VISIBLE_DEVICES to select them, or use --device_map none.'
+        )
 
-pipe.to("cuda")
+    # Diffusers can shard a component only when it loads that component itself.
+    # Expose the PE-Field replacement transformer at the location declared by
+    # the official Kontext model_index.json without duplicating its ~24 GB files.
+    transformer_source = Path(args.transformer_checkpoint_path).resolve() / 'transformer'
+    transformer_destination = Path(args.flux_kontext_path).resolve() / 'transformer'
+    if not transformer_source.is_dir():
+        raise FileNotFoundError(f'PE-Field transformer directory not found: {transformer_source}')
+
+    if os.path.lexists(transformer_destination):
+        if not transformer_destination.is_symlink() or transformer_destination.resolve() != transformer_source:
+            raise RuntimeError(
+                f'{transformer_destination} already exists and is not the expected PE-Field transformer symlink. '
+                'Move it aside, then rerun with --device_map balanced.'
+            )
+    else:
+        transformer_destination.symlink_to(
+            os.path.relpath(transformer_source, transformer_destination.parent), target_is_directory=True
+        )
+
+    max_memory = {gpu_id: args.max_gpu_memory for gpu_id in range(torch.cuda.device_count())}
+    pipe = FluxKontextPipeline.from_pretrained(
+        args.flux_kontext_path,
+        torch_dtype=torch.bfloat16,
+        device_map='balanced',
+        max_memory=max_memory,
+    )
+else:
+    transformer = FluxTransformer2DModel.from_pretrained(
+        args.transformer_checkpoint_path, subfolder='transformer', torch_dtype=torch.bfloat16
+    )
+    pipe = FluxKontextPipeline.from_pretrained(
+        args.flux_kontext_path, transformer=transformer, torch_dtype=torch.bfloat16
+    )
+    pipe.to('cuda')
+
 pipe.set_progress_bar_config(disable=True)
 
 
@@ -491,5 +537,4 @@ for image_path in image_paths:
         image.save(os.path.join(output_dir, f"{base_name}_output.png"))
     
     
-
 
