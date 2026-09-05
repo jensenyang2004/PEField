@@ -867,6 +867,7 @@ class FluxKontextPipeline(
         _auto_resize: bool = True,
         input_img_ids: Optional[Union[torch.FloatTensor, List[torch.FloatTensor]]] = None,
         input_ids: Optional[Union[torch.FloatTensor, List[torch.FloatTensor]]] = None,
+        input_text_ids: Optional[torch.FloatTensor] = None,
         use_multi_scale_position: bool = False,
         depth: Optional[Union[torch.FloatTensor, List[torch.FloatTensor]]] = None,
         input_image_latents: Optional[Union[torch.FloatTensor, List[torch.FloatTensor]]] = None,
@@ -1057,6 +1058,17 @@ class FluxKontextPipeline(
             max_sequence_length=max_sequence_length,
             lora_scale=lora_scale,
         )
+        if input_text_ids is not None:
+            if input_text_ids.ndim == 3:
+                if input_text_ids.shape[0] != 1:
+                    raise ValueError('`input_text_ids` must have batch size 1 when passed as a 3D tensor.')
+                input_text_ids = input_text_ids[0]
+            if input_text_ids.shape != text_ids.shape:
+                raise ValueError(
+                    f'`input_text_ids` must have shape {tuple(text_ids.shape)}, '
+                    f'but received {tuple(input_text_ids.shape)}.'
+                )
+            text_ids = input_text_ids.to(device=device, dtype=text_ids.dtype)
         if do_true_cfg:
             (
                 negative_prompt_embeds,
