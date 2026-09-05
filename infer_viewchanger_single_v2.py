@@ -310,8 +310,9 @@ if args.device_map == 'balanced':
     # Pipeline-level `device_map="balanced"` only assigns whole components and
     # therefore puts the entire 23.8 GB transformer on one GPU.  Shard the
     # transformer itself instead, which distributes its DiT blocks over both
-    # visible GPUs.  The remaining pipeline models are small enough to keep on
-    # the final GPU; this also makes the pipeline create its inputs there.
+    # visible GPUs. Keep the text encoders and VAE on GPU 0: placing T5-XXL on
+    # GPU 1 alongside its transformer blocks leaves too little room for the
+    # large attention workspace used during denoising.
     max_memory = {gpu_id: args.max_gpu_memory for gpu_id in range(torch.cuda.device_count())}
     transformer = FluxTransformer2DModel.from_pretrained(
         args.transformer_checkpoint_path,
@@ -325,7 +326,7 @@ if args.device_map == 'balanced':
         transformer=transformer,
         torch_dtype=torch.bfloat16,
     )
-    auxiliary_device = f'cuda:{torch.cuda.device_count() - 1}'
+    auxiliary_device = 'cuda:0'
     pipe.vae.to(auxiliary_device)
     pipe.text_encoder.to(auxiliary_device)
     pipe.text_encoder_2.to(auxiliary_device)
