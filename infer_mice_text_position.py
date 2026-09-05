@@ -135,6 +135,10 @@ def main():
         '--max_gpu_memory', type=str, default='28GiB',
         help='Per-GPU allocation limit used with --device_map balanced. Leave headroom for MoGe and activations.',
     )
+    parser.add_argument(
+        '--no_text_position_encoding', action='store_true',
+        help='Ablation: skip centroid RoPE injection for text tokens and just pass the plain concatenated prompt.',
+    )
     args = parser.parse_args()
 
     with (args.bench_dir / 'LoMOE.json').open() as file:
@@ -216,22 +220,27 @@ def main():
             args.flux_kontext_path, transformer=transformer, torch_dtype=torch.bfloat16
         ).to(device)
     pipe.set_progress_bar_config(disable=True)
-    text_ids, token_indices = make_text_ids(
-        pipe.tokenizer_2, prompt, source_spans, centroid_ids, pipe.text_encoder.dtype, pipe._execution_device
-    )
+    if args.no_text_position_encoding:
+        text_ids, token_indices = None, None
+    else:
+        text_ids, token_indices = make_text_ids(
+            pipe.tokenizer_2, prompt, source_spans, centroid_ids, pipe.text_encoder.dtype, pipe._execution_device
+        )
 
     input_image = torch.from_numpy(image_np.copy()).permute(2, 0, 1).unsqueeze(0).float()
     input_image = F.interpolate(input_image, size=(output_height, output_width), mode='bilinear', align_corners=False)
     input_image = input_image / 127.5 - 1.0
-    result = pipe(
+    pipe_kwargs = dict(
         image=input_image,
         height=output_height,
         width=output_width,
         prompt=prompt,
         input_img_ids=image_ids,
-        input_text_ids=text_ids,
         use_multi_scale_position=True,
-    ).images[0]
+    )
+    if text_ids is not None:
+        pipe_kwargs['input_text_ids'] = text_ids
+    result = pipe(**pipe_kwargs).images[0]
 
     output_dir = args.output_dir / f'{args.case:02d}'
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -241,6 +250,7 @@ def main():
             'case': args.case, 'prompt': prompt, 'source_phrases': source_phrases,
             'target_phrases': target_phrases, 'centroid_ids': centroid_ids,
             'source_token_indices': token_indices,
+            'text_position_encoding': not args.no_text_position_encoding,
         }, file, indent=2)
     print(f'Saved {output_dir / "output.png"}')
 
