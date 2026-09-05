@@ -267,6 +267,10 @@ parser.add_argument('--transformer_checkpoint_path', type=str, default = "./chec
 parser.add_argument('--flux_kontext_path', type=str, default = "./FLUX.1-Kontext-dev", required=True, help='flux path')
 parser.add_argument('--input_image', type=str, required=True, help='input image path')
 parser.add_argument('--output_dir', type=str, required=True, help='output path')
+parser.add_argument(
+    '--prompt', type=str, default='Ensure that the picture does not change in any way',
+    help='Text instruction passed to the Kontext pipeline.',
+)
 parser.add_argument('--phi', type=int, required=True, help='azimuth angle, rotation around y-axis in the horizontal xz-plane')
 parser.add_argument('--theta', type=int, required=True, help='elevation angle, measured from y-axis downward')
 parser.add_argument('--r', default= 0, type=int, required=False, help='radius')
@@ -528,7 +532,7 @@ for image_path in image_paths:
         _, _, height, width = input_image.shape
         image = pipe(
             image = input_image, height=height, width=width,
-            prompt="Ensure that the picture does not change in any way",
+            prompt=args.prompt,
             # guidance_scale=,
             input_img_ids = pix_coords_downs,
             use_multi_scale_position = True
