@@ -71,8 +71,14 @@ def make_text_ids(tokenizer, prompt, source_spans, centroid_ids, dtype, device):
     return text_ids, matched
 
 
-def prepare_image_ids_and_centroids(depth, masks, intrinsics, out_height, out_width):
-    """Create unwarped image IDs and physical mask-centroid IDs in the same RoPE frame."""
+def prepare_image_ids_and_centroids(depth, masks, intrinsics, out_height, out_width, bind_mask_to_text_position=False):
+    """Create unwarped image IDs and physical mask-centroid IDs in the same RoPE frame.
+
+    If `bind_mask_to_text_position`, every image token that falls inside an instance mask is
+    given that instance's centroid RoPE id (the same id injected into its source-phrase text
+    tokens) instead of its natural depth-derived position, at every grid scale. Later masks in
+    the list win over earlier ones on overlap.
+    """
     height, width = depth.shape
     fx, fy = intrinsics[0, 0] * width, intrinsics[1, 1] * height
     cx, cy = width / 2, height / 2
@@ -111,6 +117,12 @@ def prepare_image_ids_and_centroids(depth, masks, intrinsics, out_height, out_wi
         grid = grid.squeeze(0).permute(1, 2, 0)
         grid[..., 1] = grid[..., 1] / height * coarse_height
         grid[..., 2] = grid[..., 2] / width * coarse_width
+        if bind_mask_to_text_position:
+            for mask, centroid in zip(masks, centroid_ids):
+                mask_small = cv2.resize(
+                    mask.astype(np.uint8), (grid_width, grid_height), interpolation=cv2.INTER_NEAREST
+                ) > 0
+                grid[torch.from_numpy(mask_small)] = torch.as_tensor(centroid, dtype=grid.dtype)
         if grid_level:
             for _ in range(grid_level):
                 grid = split_into_2x2_local_grids(grid)
@@ -138,6 +150,10 @@ def main():
     parser.add_argument(
         '--no_text_position_encoding', action='store_true',
         help='Ablation: skip centroid RoPE injection for text tokens and just pass the plain concatenated prompt.',
+    )
+    parser.add_argument(
+        '--bind_mask_to_text_position', action='store_true',
+        help='Ablation: override image tokens inside each instance mask with that instance\'s text centroid RoPE id.',
     )
     args = parser.parse_args()
 
@@ -178,7 +194,10 @@ def main():
         moge_output = moge.infer(moge_input, resolution_level=9, use_fp16=False)
     depth = moge_output['depth'].cpu().numpy().squeeze()
     intrinsics = moge_output['intrinsics'].cpu().numpy()
-    image_ids, centroid_ids = prepare_image_ids_and_centroids(depth, masks, intrinsics, output_height, output_width)
+    image_ids, centroid_ids = prepare_image_ids_and_centroids(
+        depth, masks, intrinsics, output_height, output_width,
+        bind_mask_to_text_position=args.bind_mask_to_text_position,
+    )
 
     if args.device_map == 'balanced':
         if torch.cuda.device_count() < 2:
@@ -251,6 +270,7 @@ def main():
             'target_phrases': target_phrases, 'centroid_ids': centroid_ids,
             'source_token_indices': token_indices,
             'text_position_encoding': not args.no_text_position_encoding,
+            'bind_mask_to_text_position': args.bind_mask_to_text_position,
         }, file, indent=2)
     print(f'Saved {output_dir / "output.png"}')
 
