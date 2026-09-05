@@ -35,13 +35,14 @@ echo 'Downloading the official FLUX.1-Kontext-dev pipeline (without transformer)
 # only the components FluxKontextPipeline.from_pretrained() needs when a custom
 # transformer is passed by infer_viewchanger_single_v2.py.
 download black-forest-labs/FLUX.1-Kontext-dev \
-    --include 'model_index.json' \
-    --include 'scheduler/*' \
-    --include 'text_encoder/*' \
-    --include 'text_encoder_2/*' \
-    --include 'tokenizer/*' \
-    --include 'tokenizer_2/*' \
-    --include 'vae/*' \
+    --include \
+        'model_index.json' \
+        'scheduler/*' \
+        'text_encoder/*' \
+        'text_encoder_2/*' \
+        'tokenizer/*' \
+        'tokenizer_2/*' \
+        'vae/*' \
     --local-dir "$ROOT_DIR/FLUX.1-Kontext-dev"
 
 echo 'Downloading PE-Field transformer weights...'
