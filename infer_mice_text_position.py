@@ -155,6 +155,11 @@ def main():
         '--bind_mask_to_text_position', action='store_true',
         help='Ablation: override image tokens inside each instance mask with that instance\'s text centroid RoPE id.',
     )
+    parser.add_argument(
+        '--capture_attention', action='store_true',
+        help='Record text->target-latent and text->conditioning-image attention, averaged per instance over its '
+             'source-phrase tokens and over every block/timestep, and save heatmaps with the mask centroid marked.',
+    )
     args = parser.parse_args()
 
     with (args.bench_dir / 'LoMOE.json').open() as file:
@@ -239,12 +244,14 @@ def main():
             args.flux_kontext_path, transformer=transformer, torch_dtype=torch.bfloat16
         ).to(device)
     pipe.set_progress_bar_config(disable=True)
-    if args.no_text_position_encoding:
-        text_ids, token_indices = None, None
-    else:
-        text_ids, token_indices = make_text_ids(
-            pipe.tokenizer_2, prompt, source_spans, centroid_ids, pipe.text_encoder.dtype, pipe._execution_device
-        )
+    text_ids, token_indices = make_text_ids(
+        pipe.tokenizer_2, prompt, source_spans, centroid_ids, pipe.text_encoder.dtype, pipe._execution_device
+    )
+
+    recorder = None
+    if args.capture_attention:
+        from attention_capture import enable_attention_capture
+        recorder = enable_attention_capture(pipe.transformer, token_indices)
 
     input_image = torch.from_numpy(image_np.copy()).permute(2, 0, 1).unsqueeze(0).float()
     input_image = F.interpolate(input_image, size=(output_height, output_width), mode='bilinear', align_corners=False)
@@ -257,13 +264,23 @@ def main():
         input_img_ids=image_ids,
         use_multi_scale_position=True,
     )
-    if text_ids is not None:
+    if not args.no_text_position_encoding:
         pipe_kwargs['input_text_ids'] = text_ids
     result = pipe(**pipe_kwargs).images[0]
 
     output_dir = args.output_dir / f'{args.case:02d}'
     output_dir.mkdir(parents=True, exist_ok=True)
     result.save(output_dir / 'output.png')
+
+    if recorder is not None:
+        from attention_capture import save_instance_attention_maps
+        display_input = cv2.resize(image_np, (output_width, output_height), interpolation=cv2.INTER_LINEAR)
+        save_instance_attention_maps(
+            recorder, centroid_ids, source_phrases,
+            coarse_height=output_height // 16, coarse_width=output_width // 16,
+            input_image_rgb=display_input, generated_image_rgb=result,
+            output_dir=output_dir / 'attention_maps',
+        )
     with (output_dir / 'metadata.json').open('w') as file:
         json.dump({
             'case': args.case, 'prompt': prompt, 'source_phrases': source_phrases,
